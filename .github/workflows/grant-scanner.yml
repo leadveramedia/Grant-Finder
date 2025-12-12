@@ -1,0 +1,103 @@
+name: Grant Scanner
+
+on:
+  # Run daily at 9 AM Pacific (5 PM UTC)
+  schedule:
+    - cron: '0 17 * * *'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of scan to run'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - federal
+          - women_minority
+
+# Required for Workload Identity Federation
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  scan-grants:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/678452382752/locations/global/workloadIdentityPools/github-actions/providers/github'
+          service_account: 'grant-finder@gen-lang-client-0198082227.iam.gserviceaccount.com'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run grant scan
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+        run: |
+          python main.py scan
+
+      - name: Check deadlines
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+        run: |
+          python main.py status
+
+  # Weekly summary on Mondays
+  weekly-summary:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && (github.event.schedule == '0 17 * * 1')
+
+    # Required for Workload Identity Federation
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/678452382752/locations/global/workloadIdentityPools/github-actions/providers/github'
+          service_account: 'grant-finder@gen-lang-client-0198082227.iam.gserviceaccount.com'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate weekly summary
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+        run: |
+          python -c "from scheduler import run_weekly_summary; run_weekly_summary()"
