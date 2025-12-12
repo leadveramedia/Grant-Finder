@@ -1,16 +1,15 @@
 """
 Grants.gov API integration for federal grant opportunities.
 
-API Documentation: https://www.grants.gov/web/grants/s2s/grantor/schemas.html
+API Documentation: https://www.grants.gov/api/api-guide
+New 2025 API - no authentication required.
 """
 
 import logging
 from datetime import datetime, date
 from typing import List, Optional
-import xml.etree.ElementTree as ET
 
 from .base_source import BaseGrantSource, Grant, GrantType, FundingType
-from config import GRANTS_GOV_API_KEY, GRANTS_GOV_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -19,36 +18,24 @@ class GrantsGovSource(BaseGrantSource):
     """
     Fetch grants from Grants.gov federal database.
 
-    Note: Grants.gov has both REST API and XML endpoints.
-    The REST API requires registration at grants.gov.
+    Uses the new 2025 REST API (search2) which requires no authentication.
     """
 
     name = "grants.gov"
-    base_url = "https://www.grants.gov/grantsws/rest"
+    base_url = "https://api.grants.gov"
     grant_type = GrantType.FEDERAL
 
-    # CFDA (Catalog of Federal Domestic Assistance) codes relevant to MARV Media
-    RELEVANT_CFDA_PREFIXES = [
-        "11.",  # Department of Commerce (MBDA grants)
-        "59.",  # Small Business Administration
-        "19.",  # State Department (international trade)
-    ]
-
-    # Keywords to search for
+    # Keywords to search for (relevant to MARV Media)
     RELEVANT_KEYWORDS = [
         "small business",
         "minority business",
-        "women owned",
+        "women owned business",
         "marketing",
         "advertising",
         "economic development",
         "business development",
         "entrepreneur",
     ]
-
-    def __init__(self):
-        super().__init__()
-        self.api_key = GRANTS_GOV_API_KEY
 
     def fetch_grants(self) -> List[Grant]:
         """Fetch all relevant grants from Grants.gov."""
@@ -73,35 +60,39 @@ class GrantsGovSource(BaseGrantSource):
         logger.info(f"Found {len(unique_grants)} unique grants from Grants.gov")
         return unique_grants
 
-    def _search_grants(self, keyword: str, rows: int = 100) -> List[Grant]:
-        """Search for grants by keyword."""
-        # Use the search endpoint
-        url = f"{self.base_url}/opportunities/search"
+    def _search_grants(self, keyword: str, rows: int = 25) -> List[Grant]:
+        """Search for grants by keyword using the new search2 API."""
+        url = f"{self.base_url}/v1/api/search2"
 
-        params = {
+        # POST request with JSON body
+        # Note: Don't use oppStatuses filter as it returns 0 results
+        payload = {
             "keyword": keyword,
-            "oppStatuses": "forecasted|posted",  # Active opportunities
             "rows": rows,
-            "sortBy": "openDate|desc",
         }
 
-        if self.api_key:
-            params["api_key"] = self.api_key
-
         try:
-            response = self._get(url, params=params)
+            response = self._post(url, json=payload)
             data = response.json()
             return self._parse_search_results(data)
         except Exception as e:
-            logger.error(f"Grants.gov search failed: {e}")
-            # Fall back to XML endpoint if REST fails
-            return self._fetch_xml_opportunities(keyword)
+            logger.error(f"Grants.gov search failed for '{keyword}': {e}")
+            return []
 
     def _parse_search_results(self, data: dict) -> List[Grant]:
         """Parse JSON search results from REST API."""
         grants = []
 
-        opportunities = data.get("oppHits", [])
+        # The new API returns: data['data']['oppHits']
+        inner_data = data.get("data", {})
+        if isinstance(inner_data, dict):
+            opportunities = inner_data.get("oppHits", [])
+        else:
+            opportunities = data.get("oppHits", [])
+
+        if not isinstance(opportunities, list):
+            logger.warning(f"Unexpected response format: {type(opportunities)}")
+            return []
 
         for opp in opportunities:
             try:
@@ -115,71 +106,109 @@ class GrantsGovSource(BaseGrantSource):
 
     def _parse_opportunity(self, opp: dict) -> Optional[Grant]:
         """Parse a single opportunity into a Grant object."""
-        opp_id = opp.get("id") or opp.get("opportunityId")
+        # Handle different field names from API
+        opp_id = (
+            opp.get("opportunityId") or
+            opp.get("id") or
+            opp.get("oppNumber") or
+            opp.get("opportunity_id")
+        )
         if not opp_id:
             return None
 
-        # Parse dates
-        close_date = None
-        if opp.get("closeDate"):
-            try:
-                close_date = datetime.strptime(
-                    opp["closeDate"][:10], "%Y-%m-%d"
-                ).date()
-            except ValueError:
-                pass
+        # Parse dates - try multiple field names
+        close_date = self._parse_date(
+            opp.get("closeDate") or
+            opp.get("close_date") or
+            opp.get("applicationDeadline")
+        )
 
-        posted_date = None
-        if opp.get("openDate"):
-            try:
-                posted_date = datetime.strptime(
-                    opp["openDate"][:10], "%Y-%m-%d"
-                ).date()
-            except ValueError:
-                pass
+        posted_date = self._parse_date(
+            opp.get("openDate") or
+            opp.get("open_date") or
+            opp.get("postedDate") or
+            opp.get("posted_date")
+        )
 
         # Parse award amounts
-        amount_min = None
-        amount_max = None
-        if opp.get("awardCeiling"):
-            try:
-                amount_max = float(opp["awardCeiling"])
-            except (ValueError, TypeError):
-                pass
-        if opp.get("awardFloor"):
-            try:
-                amount_min = float(opp["awardFloor"])
-            except (ValueError, TypeError):
-                pass
+        amount_min = self._parse_amount(opp.get("awardFloor") or opp.get("award_floor"))
+        amount_max = self._parse_amount(opp.get("awardCeiling") or opp.get("award_ceiling"))
+
+        # Get title and description
+        title = (
+            opp.get("title") or
+            opp.get("opportunityTitle") or
+            opp.get("opportunity_title") or
+            "Untitled"
+        )
+
+        description = (
+            opp.get("synopsis") or
+            opp.get("description") or
+            opp.get("opportunitySynopsis") or
+            ""
+        )
+
+        # Get agency name
+        funder = (
+            opp.get("agencyName") or
+            opp.get("agency") or
+            opp.get("agency_name") or
+            "Federal Agency"
+        )
 
         # Build grant object
         return Grant(
             id=f"grants_gov_{opp_id}",
             source=self.name,
             source_url=f"https://www.grants.gov/search-results-detail/{opp_id}",
-            title=opp.get("title", "Untitled"),
-            description=opp.get("synopsis", opp.get("description", "")),
-            funder=opp.get("agencyName", opp.get("agency", "Federal Agency")),
+            title=title,
+            description=description,
+            funder=funder,
             amount_min=amount_min,
             amount_max=amount_max,
             deadline=close_date,
             posted_date=posted_date,
             grant_type=GrantType.FEDERAL,
             funding_type=FundingType.GRANT,
-            eligibility_summary=opp.get("eligibleApplicants", ""),
+            eligibility_summary=opp.get("eligibleApplicants", opp.get("eligible_applicants", "")),
             application_url=f"https://www.grants.gov/search-results-detail/{opp_id}",
             raw_data=opp,
         )
 
-    def _fetch_xml_opportunities(self, keyword: str = None) -> List[Grant]:
-        """
-        Fallback: Fetch from XML extract (doesn't require API key).
-        Note: This is a larger download and should be cached.
-        """
-        # Grants.gov provides daily XML extracts
-        # For now, return empty - implement caching later
-        logger.info("XML fallback not yet implemented")
-        return []
+    def _parse_date(self, date_str) -> Optional[date]:
+        """Parse date from various formats."""
+        if not date_str:
+            return None
+
+        # Try multiple date formats
+        formats = [
+            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%m/%d/%Y",
+        ]
+
+        for fmt in formats:
+            try:
+                return datetime.strptime(str(date_str)[:19], fmt).date()
+            except ValueError:
+                continue
+
+        return None
+
+    def _parse_amount(self, amount) -> Optional[float]:
+        """Parse amount from various formats."""
+        if not amount:
+            return None
+
+        try:
+            # Handle string with commas or dollar signs
+            if isinstance(amount, str):
+                amount = amount.replace("$", "").replace(",", "")
+            return float(amount)
+        except (ValueError, TypeError):
+            return None
 
     def get_grant_details(self, grant_id: str) -> Optional[Grant]:
         """Get detailed information about a specific grant."""
@@ -189,36 +218,12 @@ class GrantsGovSource(BaseGrantSource):
         else:
             opp_id = grant_id
 
-        url = f"{self.base_url}/opportunities/v1/{opp_id}"
-
-        if self.api_key:
-            url += f"?api_key={self.api_key}"
+        url = f"{self.base_url}/v1/api/fetchOpportunity"
 
         try:
-            response = self._get(url)
+            response = self._post(url, json={"opportunityId": opp_id})
             data = response.json()
-            return self._parse_opportunity(data)
+            return self._parse_opportunity(data.get("data", data))
         except Exception as e:
             logger.error(f"Failed to get grant details: {e}")
             return None
-
-    def search_by_cfda(self, cfda_number: str) -> List[Grant]:
-        """Search for grants by CFDA number."""
-        url = f"{self.base_url}/opportunities/search"
-
-        params = {
-            "cfdaNumber": cfda_number,
-            "oppStatuses": "forecasted|posted",
-            "rows": 100,
-        }
-
-        if self.api_key:
-            params["api_key"] = self.api_key
-
-        try:
-            response = self._get(url, params=params)
-            data = response.json()
-            return self._parse_search_results(data)
-        except Exception as e:
-            logger.error(f"CFDA search failed: {e}")
-            return []
