@@ -6,7 +6,8 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from google.oauth2.service_account import Credentials
+import google.auth
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -57,24 +58,41 @@ class SheetsTracker:
         self._connected = False
 
     def connect(self) -> bool:
-        """Initialize connection to Google Sheets."""
-        if not GOOGLE_APPLICATION_CREDENTIALS:
-            logger.error("GOOGLE_APPLICATION_CREDENTIALS not set")
-            return False
+        """Initialize connection to Google Sheets.
 
+        Supports multiple authentication methods:
+        1. Application Default Credentials (GitHub Actions via WIF, or gcloud CLI)
+        2. Service account file (if GOOGLE_APPLICATION_CREDENTIALS points to a file)
+        """
         if not self.sheet_id:
             logger.error("GOOGLE_SHEETS_ID not set")
             return False
 
         try:
-            creds = Credentials.from_service_account_file(
-                GOOGLE_APPLICATION_CREDENTIALS,
-                scopes=GOOGLE_SHEETS_SCOPES
-            )
+            # Try Application Default Credentials first (works with WIF and gcloud)
+            creds, project = google.auth.default(scopes=GOOGLE_SHEETS_SCOPES)
             self.service = build("sheets", "v4", credentials=creds)
             self._connected = True
-            logger.info("Connected to Google Sheets")
+            logger.info("Connected to Google Sheets using Application Default Credentials")
             return True
+        except google.auth.exceptions.DefaultCredentialsError:
+            # Fall back to service account file if ADC not available
+            if GOOGLE_APPLICATION_CREDENTIALS:
+                try:
+                    creds = ServiceAccountCredentials.from_service_account_file(
+                        GOOGLE_APPLICATION_CREDENTIALS,
+                        scopes=GOOGLE_SHEETS_SCOPES
+                    )
+                    self.service = build("sheets", "v4", credentials=creds)
+                    self._connected = True
+                    logger.info("Connected to Google Sheets using service account file")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to connect with service account: {e}")
+                    return False
+            else:
+                logger.error("No credentials available. Run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS")
+                return False
         except Exception as e:
             logger.error(f"Failed to connect to Google Sheets: {e}")
             return False
