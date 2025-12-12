@@ -38,14 +38,11 @@ def scan():
     console.print(Panel("Scanning for grants...", style="blue"))
 
     # Import sources here to avoid circular imports
-    from sources import BaseGrantSource
+    from sources import get_all_sources
+    from matcher import match_grants
+    from sheets_tracker import SheetsTracker
 
-    sources_to_scan = []
-
-    # TODO: Add configured sources
-    # from sources.grants_gov import GrantsGovSource
-    # from sources.minority_women import AmberGrantSource
-    # sources_to_scan = [GrantsGovSource(), AmberGrantSource()]
+    sources_to_scan = get_all_sources()
 
     if not sources_to_scan:
         console.print("[yellow]No grant sources configured yet.[/yellow]")
@@ -58,11 +55,42 @@ def scan():
         try:
             grants = source.fetch_grants()
             all_grants.extend(grants)
-            console.print(f"    Found {len(grants)} grants")
+            console.print(f"    [green]Found {len(grants)} grants[/green]")
         except Exception as e:
             console.print(f"    [red]Error: {e}[/red]")
 
-    console.print(f"\n[green]Total grants found: {len(all_grants)}[/green]")
+    console.print(f"\n[bold]Total grants found: {len(all_grants)}[/bold]")
+
+    if not all_grants:
+        console.print("[yellow]No grants found from any source.[/yellow]")
+        return
+
+    # Match grants against company profile
+    console.print("\n[bold]Matching against MARV Media profile...[/bold]")
+    matched = match_grants(all_grants)
+    console.print(f"[green]Found {len(matched)} eligible grants[/green]")
+
+    # Add to Google Sheets
+    tracker = SheetsTracker()
+    if tracker.connect():
+        console.print("\n[bold]Adding to Google Sheets...[/bold]")
+        new_count = 0
+        for result in matched:
+            if not tracker.grant_exists(result.grant.id):
+                tracker.add_grant_to_pipeline(
+                    result.grant,
+                    eligibility_score=result.score,
+                    status="New",
+                    notes="; ".join(result.reasons[:3])
+                )
+                new_count += 1
+                console.print(f"  [green]+[/green] {result.grant.title[:50]}...")
+        console.print(f"\n[bold green]Added {new_count} new grants to pipeline[/bold green]")
+    else:
+        console.print("[yellow]Could not connect to Google Sheets - grants not saved[/yellow]")
+        # Still show matched grants
+        for result in matched[:10]:
+            console.print(f"  - {result.grant.title} ({result.score:.0%} match)")
 
 
 @cli.command()

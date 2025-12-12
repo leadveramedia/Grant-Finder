@@ -37,6 +37,8 @@ jobs:
         with:
           workload_identity_provider: 'projects/678452382752/locations/global/workloadIdentityPools/github-actions/providers/github'
           service_account: 'grant-finder@gen-lang-client-0198082227.iam.gserviceaccount.com'
+          create_credentials_file: true
+          export_environment_variables: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,6 +85,8 @@ jobs:
         with:
           workload_identity_provider: 'projects/678452382752/locations/global/workloadIdentityPools/github-actions/providers/github'
           service_account: 'grant-finder@gen-lang-client-0198082227.iam.gserviceaccount.com'
+          create_credentials_file: true
+          export_environment_variables: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
